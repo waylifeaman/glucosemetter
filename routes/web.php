@@ -1,35 +1,22 @@
 <?php
 
-use App\Http\Controllers\keluarga;
 use App\Http\Controllers\pengguna;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\PasienController;
 use App\Http\Controllers\penyakitController;
-use App\Models\Pasien;
 use App\Http\Controllers\TopicController;
+use App\Http\Controllers\MQTTController;
 
-// Route::get('/', function () {
-//     return view('welcome');
-// });
 Route::get('logout-user', function () {
     Auth::logout();
     return redirect('/');
 })->name('logout-user');
 
-// routes/web.php
-
-
 Auth::routes();
 
 Auth::routes(['verify' => true]);
-// Route::get('/home', [App\Http\Controllers\HomeController::class, 'index'])
-//     ->middleware('verified'); // Pastikan middleware 'verified' digunakan
-
-
 Route::get('/home', [App\Http\Controllers\PasienController::class, 'index'])->name('home')->middleware('verified'); // Pastikan middleware 'verified' digunakan
-
-
 
 Route::resource('/', PasienController::class);
 Route::resource('pasien', PasienController::class);
@@ -39,9 +26,6 @@ Route::get('/pasien/update/{id}', [PasienController::class, 'show'])->name('pasi
 Route::delete('/pasien/hapus/{id}', [PasienController::class, 'destroy'])->name('pasien.destroy');
 Route::put('/pasien/{id}', 'PasienController@update')->name('pasien.update');
 
-
-// Route::get('data-pasien', PasienController::class, 'index')->name('data-pasien');
-// Route::get('/penyakit/create/{id}', [penyakitController::class, 'create'])->name('penyakit.create');
 Route::resource('penyakit', penyakitController::class);
 Route::get('/penyakit/{id}/show', [PenyakitController::class, 'show'])->name('penyakit.show');
 Route::get('penyakit/{id}/create', [penyakitController::class, 'create'])->name('penyakit.create');
@@ -71,7 +55,7 @@ Route::get('/mqtt/get-data', [penyakitController::class, 'getData']);
 
 
 
-use App\Http\Controllers\MQTTController;
+
 
 Route::get('/mqtt-form', function () {
     return view('home');
