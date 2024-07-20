@@ -1,0 +1,445 @@
+#include <WiFiManager.h>
+#include <Wire.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+#include "spo2_algorithm.h"
+#include <ESP8266WiFi.h>
+#include <LiquidCrystal_I2C.h>
+#include <ESP8266WebServer.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+#define LED_R D6
+#define LED_G D7
+#define LED_B D8
+#define LED_ON HIGH
+#define LED_OFF LOW
+
+MAX30105 particleSensor;
+LiquidCrystal_I2C lcd(0x27, 16, 2); // Inisialisasi alamat I2C dan ukuran LCD
+WiFiManager wm;
+
+ESP8266WebServer server(80);
+const char* mqtt_server = "test.mosquitto.org";
+
+// Inisialisasi WiFi dan MQTT client
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+String lastReceivedID = "";
+String lastReceivedName = "";
+unsigned long lastSendTime = 0;
+const unsigned long interval = 60000; // 1 menit dalam milidetik
+
+String serverIP = ""; // Variabel global untuk menyimpan alamat IP server
+const char* URL = ""; // Alamat server, akan diinisialisasi setelah mendapat IP dari handleUpdateServerIP
+const int serverPort = 80; // Port server HTTP
+
+const byte RATE_SIZE = 4; // Increase this for more averaging. 4 is good.
+byte rates[RATE_SIZE]; // Array of heart rates
+byte rateSpot = 0;
+long lastBeat = 0; // Time at which the last beat occurred
+
+// nilai SPO2
+uint32_t irBuffer[100]; // infrared LED sensor data
+uint32_t redBuffer[100]; // red LED sensor data
+int32_t bufferLength; // data length
+int32_t spo2; // SPO2 value
+int8_t validSPO2; // indicator to show if the SPO2 calculation is valid
+int32_t heartRate; // heart rate value
+int8_t validHeartRate; // indicator to show if the heart rate calculation is valid
+
+float beatsPerMinute;
+int beatAvg;
+
+int buttonState = 0;
+int lastButtonState = 0;
+long lastDebounceTime = 0;
+long debounceDelay = 50;
+
+enum SensorMode {
+  BPM_MODE,
+  SPO2_MODE
+};
+
+float predictedGlucose;
+SensorMode currentMode = BPM_MODE; // Default mode
+
+String receivedValue = "";
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  
+  String message = "";
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  Serial.println(message);
+  
+  // Extract ID and name from the JSON message
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, message);
+  
+  if (error) {
+    Serial.print("deserializeJson() failed: ");
+    Serial.println(error.c_str());
+    return;
+  }
+  
+  // Mengambil nilai id sebagai integer
+  lastReceivedID = doc["id"].as<int>();
+  // Mengambil nilai name sebagai string
+  lastReceivedName = doc["nama"].as<String>();
+  lastSendTime = millis(); // Reset the timer
+
+  Serial.print("Id: ");
+  Serial.println(lastReceivedID);
+  Serial.print("Nama: ");
+  Serial.println(lastReceivedName);
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("SELAMAT DATANG");
+  lcd.setCursor(0, 1);
+  int nameLength = lastReceivedName.length();
+  int spaces = (16 - nameLength) / 2; // Assuming 16 characters per line
+  String paddedName = "";
+  for (int i = 0; i < spaces; i++) {
+    paddedName += " ";
+  }
+  paddedName += lastReceivedName;
+  lcd.print(paddedName);
+
+  startSensor();
+}
+
+void reconnect() {
+  // Loop sampai terkoneksi
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Buat client ID
+    String clientId = "ESP8266Client-";
+    clientId += String(random(0xffff), HEX);
+    // Coba koneksi
+    if (client.connect(clientId.c_str())) {
+      Serial.println("connected");
+      // Subscribe ke topic
+      client.subscribe("topicsub");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Tunggu 5 detik sebelum mencoba lagi
+      delay(5000);
+    }
+  }
+}
+
+void startSensor() {
+  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) { // Gunakan port I2C default ESP8266, kecepatan 100kHz
+    Serial.println("MAX30105 was not found. Please check wiring/power.");
+    while (1);
+  }
+  Serial.println("Place your index finger on the sensor with steady pressure.");
+  delay(3000);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("  TEKAN MULAI");
+  lcd.setCursor(0, 1);
+  lcd.print("UNTUK PENGUKURAN");
+  digitalWrite(LED_R, LED_OFF);
+  digitalWrite(LED_G, LED_ON);
+  digitalWrite(LED_B, LED_OFF);
+  particleSensor.setup(); // Konfigurasi sensor dengan pengaturan default
+  particleSensor.setPulseAmplitudeRed(0x0A); // Menyalakan LED merah untuk menunjukkan sensor berjalan
+  particleSensor.setPulseAmplitudeGreen(0); // Matikan LED hijau
+}
+
+void setup() {
+  WiFi.mode(WIFI_STA);
+  Serial.begin(115200);
+  Serial.println("Initializing...");
+  
+  pinMode(D1, OUTPUT);
+  pinMode(D2, OUTPUT);
+  pinMode(LED_R, OUTPUT);
+  pinMode(LED_G, OUTPUT);
+  pinMode(LED_B, OUTPUT);
+  pinMode(D3, INPUT_PULLUP); // Internal pull-up resistor
+  
+  digitalWrite(LED_R, LED_OFF);
+  digitalWrite(LED_G, LED_OFF);
+  digitalWrite(LED_B, LED_OFF);
+
+  lcd.init(); // Inisialisasi LCD
+  lcd.backlight(); // Nyalakan backlight LCD
+  Wire.begin(); // Inisialisasi I2C pada ESP8266
+
+  wm.setDebugOutput(false);
+  // Remove any previous network settings
+  // wm.resetSettings();
+  // Define a text box, 50 characters maximum
+  WiFiManagerParameter custom_text_box("my_text", "Enter your string here", "default string", 50);
+
+  // Add custom parameter
+  wm.addParameter(&custom_text_box);
+ 
+  // Blink LED B while searching for WiFi
+  digitalWrite(LED_B, LED_ON);
+  digitalWrite(LED_G, LED_OFF);
+
+  lcd.clear();
+  lcd.print("NOT CONNECT WIFI");
+  bool res = wm.autoConnect("GlucoseMetter", "password"); // password protected ap
+  if (!res) {
+    Serial.println("Failed to connect");
+    ESP.restart();
+    delay(1000);
+  }
+  // Connected!
+  digitalWrite(LED_B, LED_OFF);
+  digitalWrite(LED_G, LED_ON);
+  
+  Serial.println("WiFi connected");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("SSID: ");
+  Serial.println(WiFi.SSID());
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("  CONNECTED TO");
+  lcd.setCursor(0, 1);
+  int SsidLength = WiFi.SSID().length();
+  int spaces = (16 - SsidLength) / 2; // Assuming 16 characters per line
+  String paddedSsid = "";
+  for (int i = 0; i < spaces; i++) {
+    paddedSsid += " ";
+  }
+  paddedSsid += WiFi.SSID();
+  lcd.print(paddedSsid);
+
+  delay(2000);
+  
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+  server.begin();
+  // Display "Pilih ID" until data is received
+  lcd.clear();
+  lcd.setCursor(0, 0);      
+  lcd.print(" PILIH PENGGUNA");
+}
+
+void loop() {
+  wm.process();
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+  
+  // Check if 1 minute has passed since the last ID was received
+  if (lastReceivedID.length() > 0) {
+    unsigned long currentMillis = millis();
+    if (currentMillis - lastSendTime >= interval) {
+      // sendID(lastReceivedID.c_str());
+      lastSendTime = currentMillis; // Reset the timer for the next send
+    }
+  }
+
+  int reading = digitalRead(D3);
+
+  // Check if the button state has changed
+  if (reading != lastButtonState) {
+    // Reset the debounce timer
+    lastDebounceTime = millis();
+  }
+
+  // Check if the debounce delay has passed
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    // If the reading has changed, update the button state
+    if (reading != buttonState) {
+      buttonState = reading;
+      
+      // If the button is pressed
+      if (buttonState == LOW) {
+        // Toggle sensor mode
+        if (currentMode == BPM_MODE) {
+          runBPMMode();
+          runSPO2Mode();
+          KalibrasiGLucosa();
+          startSensor();
+        }
+      }
+    }
+  }
+
+  lastButtonState = reading;
+}
+
+void runBPMMode() {
+  Serial.println("Mulai BPM Mode");
+  unsigned long startTime = millis();
+  while (millis() - startTime < 30000) {
+    digitalWrite(LED_B, LED_OFF);
+    digitalWrite(LED_G, LED_OFF);
+    long irValue = particleSensor.getIR();
+    
+    if (irValue < 50000) {
+      beatsPerMinute = 0.0;
+      beatAvg = 0.0;
+    } else {
+      if (checkForBeat(irValue)) {
+        long delta = millis() - lastBeat;
+        lastBeat = millis();
+        beatsPerMinute = 60 / (delta / 1000.0);
+        
+        if (beatsPerMinute < 255 && beatsPerMinute > 20) {
+          rates[rateSpot++] = (byte)beatsPerMinute;
+          rateSpot %= RATE_SIZE;
+
+          beatAvg = 0;
+          for (byte x = 0; x < RATE_SIZE; x++)
+            beatAvg += rates[x];
+          beatAvg /= RATE_SIZE;
+        }
+      }
+    }
+    Serial.print("IR=");
+    Serial.print(irValue);
+    Serial.print(", BPM=");
+    Serial.print(beatsPerMinute);
+    Serial.print(", Avg BPM=");
+    Serial.print(beatAvg);
+    Serial.println();
+
+    if (irValue > 100000){        
+      digitalWrite(LED_R, LED_ON);
+    } else {
+      digitalWrite(LED_R, LED_OFF);     
+    }
+
+    // Update LCD
+    lcd.clear(); // Bersihkan layar LCD
+    lcd.setCursor(0, 0);
+    lcd.print("BPM: ");
+    lcd.print(beatAvg);
+    lcd.setCursor(0, 1);
+    lcd.print("SPO2: ");
+  }
+  Serial.print("Hasil BPM Mode: ");
+  Serial.println(beatAvg);
+}
+
+void runSPO2Mode() {
+  Serial.println("Mulai SPO2 Mode");
+  unsigned long startTime = millis();
+  while (millis() - startTime < 16000) {
+    bufferLength = 100; // buffer length of 100 stores 4 seconds of samples running at 25sps
+
+    // read the first 100 samples, and determine the signal range
+    for (byte i = 0 ; i < bufferLength ; i++) {
+      while (particleSensor.available() == false) // do we have new data?
+        particleSensor.check(); // Check the sensor for new data
+
+      redBuffer[i] = particleSensor.getRed();
+      irBuffer[i] = particleSensor.getIR();
+      particleSensor.nextSample(); // We're finished with this sample so move to next sample
+    }
+
+    // calculate heart rate and SpO2 after first 100 samples (first 4 seconds of samples)
+    maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+
+    // Send data to Serial Monitor
+    Serial.print(F("BPM="));
+    Serial.print(heartRate);
+    Serial.print(F(", ValidHR="));
+    Serial.print(validHeartRate);
+    Serial.print(F(", SPO2="));
+    Serial.print(spo2, DEC);
+    Serial.print(F(", SPO2Valid="));
+    Serial.println(validSPO2, DEC);
+    // Update LCD
+    lcd.clear(); // Bersihkan layar LCD
+    lcd.setCursor(0, 0);
+    lcd.print("BPM: ");
+    lcd.print(beatAvg);
+
+    lcd.setCursor(0, 1);
+    lcd.print("SPO2: "); 
+    lcd.print(spo2); 
+    delay(3000);
+  }
+
+  Serial.print("Hasil BPM Mode: ");
+  Serial.println(beatAvg);
+  Serial.print("Hasil SPO2 Mode: ");
+  Serial.println(spo2);
+}
+
+void KalibrasiGLucosa() {
+  // Rumus Prediksi GLucosa
+  predictedGlucose = 16714.61 + (0.47 * beatAvg) - (351.045 * spo2) + (1.85 * (spo2 * spo2));
+           
+  Serial.print("Predicted Glucose= ");
+  Serial.println(predictedGlucose);
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("PREDIKSI GLUKOSA ");
+  lcd.setCursor(0, 1);
+  lcd.print("  ");
+  lcd.print(predictedGlucose);
+  lcd.print("mg/dl");
+  sendData();
+  delay(10000);
+  // Mengirim data setelah perhitungan prediksi glukosa selesai
+
+
+
+  lcd.clear();
+  beatsPerMinute = 0;
+  beatAvg = 0;
+  digitalWrite(LED_R, LED_OFF);
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("   PENGUKURAN");
+  lcd.setCursor(0, 1);
+  lcd.print("    SELESAI");
+  
+  delay(1000);
+}
+
+void sendData() {
+  // Pastikan klien MQTT terhubung
+  if (!client.connected()) {
+    Serial.println("MQTT client not connected, attempting to reconnect...");
+    reconnect();
+  }
+
+  // Membuat objek JSON untuk mengirim data
+  StaticJsonDocument<200> jsonDoc;
+  jsonDoc["id"] = lastReceivedID;
+  jsonDoc["BPM"] = beatAvg;
+  jsonDoc["SpO2"] = spo2;
+  jsonDoc["PredictedGlucose"] = predictedGlucose;
+
+  // Mengonversi objek JSON menjadi string
+  char buffer[256];
+  size_t n = serializeJson(jsonDoc, buffer);
+
+  // Mencetak data yang akan dikirim ke Serial Monitor untuk debug
+  Serial.print("Sending data: ");
+  Serial.println(buffer);
+
+  // Mengirim data ke broker MQTT dengan topik "topicpub"
+  if (client.publish("postdataGluc", buffer, n)) {
+    Serial.println("Data sent successfully");
+  } else {
+    Serial.println("Failed to send data");
+  }
+}
+
+
