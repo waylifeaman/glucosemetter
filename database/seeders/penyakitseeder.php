@@ -2,36 +2,23 @@
 
 namespace Database\Seeders;
 
-use App\Models\penyakit;
+use App\Models\Penyakit;
 use Illuminate\Database\Seeder;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 
-class penyakitseeder extends Seeder
+class PenyakitSeeder extends Seeder
 {
     /**
      * Run the database seeds.
      */
-    public function run()
+    public function run(): void
     {
-        // Menggunakan query builder untuk memasukkan data dummy
-        DB::table('penyakits')->insert([
-            [
-                'id_pasien' => 5, // Pastikan pasien dengan ID ini ada
-                'bpm' => 72,
-                'spo2' => 98,
-                'gula_darah' => 90,
-            ],
-            [
-                'id_pasien' => 3, // Pastikan pasien dengan ID ini ada
-                'bpm' => 80,
-                'spo2' => 99,
-                'gula_darah' => 100,
-            ],
-            // Tambahkan data lain sesuai kebutuhan
-        ]);
-
-        // Alternatif dengan menggunakan Eloquent Model
-        penyakit::factory()->count(10)->create();
+        for ($i = 1; $i <= 10; $i++) {
+            Penyakit::create([
+                'id_pasien'  => 1, // Pastikan ID Pasien 1 sampai 10 sudah ada di tabel pasiens
+                'bpm'        => rand(60, 100),
+                'spo2'       => rand(95, 100),
+                'gula_darah' => rand(7000, 18000) / 100, // Menghasilkan nilai decimal acak (contoh: 110.50)
+            ]);
+        }
     }
 }

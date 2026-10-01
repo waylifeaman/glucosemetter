@@ -14,33 +14,6 @@ class MQTTController extends Controller
     {
         $this->mqttService = $mqttService;
     }
-    // public function sendData(Request $request)
-    // {
-    //     // Ambil ID dari user yang sedang aktif
-    //     $userId = auth()->id();
-
-    //     // Ambil user berdasarkan ID
-    //     $user = User::findOrFail($userId);
-
-    //     // Ambil topic_pub dari relasi topic user
-    //     $topic = $user->topic->topic_pub;
-
-    //     $data = [
-    //         'id' => $request->input('id'),
-    //         'nama' => $request->input('nama')
-    //     ];
-
-    //     $message = json_encode($data);
-
-    //     if ($this->mqttService->publish($topic, $message)) {
-    //         return response()->json(['message' => 'Data sent successfully'], 200);
-    //     } else {
-    //         return response()->json(['message' => 'Failed to send data'], 500);
-    //     }
-    // }
-
-
-
 
     public function sendData(Request $request)
     {

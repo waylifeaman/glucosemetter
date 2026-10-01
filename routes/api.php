@@ -2,18 +2,12 @@
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\DataController;
 use App\Http\Controllers\penyakitController;
 
 Route::get('/user', function (Request $request) {
     return $request->user();
 })->middleware('auth:sanctum');
 
-// routes/api.php
-Route::post('data', [DataController::class, 'store']);
-
-
-Route::get('data', [DataController::class, 'index']);
 
 
 Route::post('/', function (\Illuminate\Http\Request $request) {
